@@ -1,0 +1,9 @@
+dist/
+*.tmp
+__pycache__/
+*.wixpdb
+
+# Customer-specific data (Billora is white-label): keep on this PC only.
+maestro-setup.json
+menu.py
+logo.png

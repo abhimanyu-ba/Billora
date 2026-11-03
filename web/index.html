@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Billora</title>
+<link rel="icon" href="icon.png">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="splash"><div class="sp-in"><img src="splash.jpg" alt="Billora">
+  <div class="sp-txt" id="spTxt">Initializing your workspace...</div><div class="sp-bar"><i id="spFill"></i></div></div></div>
+<header id="top">
+  <div class="brand"><img id="brandLogo" alt=""><span id="brandName">Billora</span></div>
+  <nav id="tabs">
+    <button data-tab="bill" class="on">New Bill <kbd>F1</kbd></button>
+    <button data-tab="bills">Bills</button>
+    <button data-tab="customers">Customers</button>
+    <button data-tab="reports">Reports</button>
+    <button data-tab="services">Services</button>
+    <button data-tab="staff">Staff</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+  <div id="clock"></div>
+</header>
+
+<main>
+<!-- ================= NEW BILL ================= -->
+<section id="tab-bill" class="tab on">
+  <div class="bill-left">
+    <div class="row gap">
+      <div id="groupBtns" class="seg"></div>
+      <input id="svcSearch" class="grow" placeholder="Search service…  (F2)  — press Enter to add the first match" autocomplete="off">
+    </div>
+    <div id="catChips" class="chips"></div>
+    <div id="svcGrid" class="svc-grid"></div>
+  </div>
+  <div class="bill-right">
+    <div class="card cust">
+      <div class="row gap">
+        <input id="cPhone" class="grow" inputmode="tel" maxlength="15" placeholder="Customer mobile" autocomplete="off">
+        <input id="cName" class="grow2" placeholder="Customer name" autocomplete="off" list="custNames">
+      </div>
+      <datalist id="custNames"></datalist>
+      <div id="custInfo" class="muted small"></div>
+    </div>
+    <div class="card cart-card">
+      <table class="cart">
+        <thead><tr><th>Service</th><th class="w-staff">Staff</th><th class="w-qty">Qty</th><th class="w-price">Price ₹</th><th class="w-amt">Amount</th><th></th></tr></thead>
+        <tbody id="cartBody"></tbody>
+      </table>
+      <div id="cartEmpty" class="empty">Tap a service on the left to add it to the bill</div>
+      <button id="addCustom" class="link">+ Add a custom item</button>
+    </div>
+    <div class="card totals">
+     <div class="tcols">
+      <div class="tleft">
+      <div class="row gap center">
+        <span>Discount</span>
+        <div class="seg sm" id="discType"><button data-v="amt" class="on">₹</button><button data-v="pct">%</button></div>
+        <input id="discVal" type="number" min="0" step="1" value="" placeholder="0" class="num w80">
+      </div>
+      <div class="pay">
+        <div class="seg" id="payMode">
+          <button data-v="Cash" class="on">Cash</button><button data-v="UPI">UPI</button><button data-v="Card">Card</button><button data-v="Split">Split</button>
+        </div>
+        <div id="splitBox" class="row gap hidden">
+          <label class="f">Cash<input id="spCash" type="number" class="num" min="0"></label>
+          <label class="f">UPI<input id="spUpi" type="number" class="num" min="0"></label>
+          <label class="f">Card<input id="spCard" type="number" class="num" min="0"></label>
+        </div>
+        <div id="cashBox" class="row gap center">
+          <label class="f">Cash received<input id="received" type="number" class="num" min="0" placeholder="optional"></label>
+          <div id="changeLbl" class="change"></div>
+        </div>
+      </div>
+      <input id="bNotes" placeholder="Note on bill (optional)" class="full">
+      </div>
+      <div class="tright">
+        <div class="muted small r" id="gstModeLbl"></div>
+        <div id="totLines" class="totlines"></div>
+        <div class="grand"><span>Total</span><span id="grand">₹0</span></div>
+      </div>
+     </div>
+      <div class="row gap actions">
+        <button id="btnClear" class="ghost">Clear</button>
+        <span class="grow"></span>
+        <button id="btnSave" class="sec">Save only</button>
+        <button id="btnSaveWa" class="sec" title="Save and open the customer's WhatsApp chat with the receipt">Save &amp; WhatsApp</button>
+        <button id="btnSavePrint" class="pri">Save &amp; Print <kbd>F9</kbd></button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= BILLS ================= -->
+<section id="tab-bills" class="tab">
+  <div class="toolbar">
+    <h2>Bills</h2>
+    <div class="seg" id="billsRange"></div>
+    <input type="date" id="bFrom"><span>to</span><input type="date" id="bTo">
+    <input id="bSearch" placeholder="Search invoice no, name, mobile" class="grow">
+    <button id="bExport" class="sec">Export CSV</button>
+  </div>
+  <div id="billsSummary" class="summary"></div>
+  <div class="tablewrap"><table class="list" id="billsTable"></table></div>
+</section>
+
+<!-- ================= CUSTOMERS ================= -->
+<section id="tab-customers" class="tab">
+  <div class="toolbar">
+    <h2>Customers</h2>
+    <input id="custSearch" placeholder="Search name or mobile" class="grow">
+    <button id="custExport" class="sec">Export CSV</button>
+  </div>
+  <div class="tablewrap"><table class="list" id="custTable"></table></div>
+</section>
+
+<!-- ================= REPORTS ================= -->
+<section id="tab-reports" class="tab">
+  <div class="toolbar">
+    <h2>Reports</h2>
+    <div class="seg" id="repRange"></div>
+    <input type="date" id="rFrom"><span>to</span><input type="date" id="rTo">
+    <span class="grow"></span>
+    <button id="rPrint" class="sec">Print report</button>
+    <button id="rExport" class="sec">GST export (CSV)</button>
+  </div>
+  <div id="repBody"></div>
+</section>
+
+<!-- ================= SERVICES ================= -->
+<section id="tab-services" class="tab">
+  <div class="toolbar">
+    <h2>Services &amp; Prices</h2>
+    <div class="seg" id="svcGroupFilter"></div>
+    <input id="svcAdminSearch" placeholder="Search" class="grow">
+    <button id="svcImportCsv" class="sec">Import CSV</button>
+    <button id="svcExportCsv" class="sec">Export CSV</button>
+    <button id="svcAdd" class="pri">+ Add service</button>
+  </div>
+  <p class="muted small">Tip: for a price range (e.g. ₹6000–10000) enter both prices. The lower price is used on the bill and you can change it while billing.</p>
+  <div class="tablewrap"><table class="list" id="svcTable"></table></div>
+</section>
+
+<!-- ================= STAFF ================= -->
+<section id="tab-staff" class="tab">
+  <div class="toolbar">
+    <h2>Staff</h2>
+    <input id="staffNew" placeholder="Staff name" class="w240">
+    <button id="staffAdd" class="pri">+ Add</button>
+  </div>
+  <p class="muted small">Staff are optional. When added, you can pick who did each service, and Reports show each person's work for commission.</p>
+  <div class="tablewrap"><table class="list" id="staffTable"></table></div>
+</section>
+
+<!-- ================= SETTINGS ================= -->
+<section id="tab-settings" class="tab">
+  <div class="settings">
+    <div class="card">
+      <h3>Business details <span class="muted small">(printed on every bill)</span></h3>
+      <div class="grid2">
+        <label class="f">Business / salon name<input data-s="shopName"></label>
+        <label class="f">Owner / legal name (optional)<input data-s="legalName"></label>
+        <label class="f span2">Address<textarea data-s="address" rows="2"></textarea></label>
+        <label class="f">Phone<input data-s="phone"></label>
+        <label class="f">Email / website (optional)<input data-s="email"></label>
+      </div>
+      <div class="row gap center logo-row">
+        <img id="logoPrev" alt="">
+        <div>
+          <input type="file" id="logoFile" accept="image/*" class="hidden">
+          <button class="sec" id="logoPick">Upload logo</button>
+          <button class="ghost" id="logoRemove">Remove</button>
+          <label class="chk"><input type="checkbox" data-s="showLogo"> Print logo on bill</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>GST / Tax</h3>
+      <div class="grid2">
+        <label class="f span2">How should GST be charged?
+          <select data-s="gstMode">
+            <option value="inclusive">Prices already INCLUDE GST (customer pays menu price)</option>
+            <option value="exclusive">ADD GST on top of prices</option>
+            <option value="none">No GST (not registered / composition)</option>
+          </select>
+        </label>
+        <label class="f">GSTIN<input data-s="gstin" maxlength="15" style="text-transform:uppercase"></label>
+        <label class="f">GST rate %<input data-s="gstRate" type="number" min="0" max="28" step="0.5"></label>
+        <label class="f">State<input data-s="stateName"></label>
+        <label class="f">State code<input data-s="stateCode" maxlength="2"></label>
+        <label class="f">SAC code<input data-s="sac"></label>
+      </div>
+      <p class="muted small">Salon and beauty services are usually 18% GST (CGST 9% + SGST 9%). Please confirm with your accountant.</p>
+    </div>
+
+    <div class="card">
+      <h3>Bill &amp; printing</h3>
+      <div class="grid2">
+        <label class="f">Bill / paper size
+          <select data-s="billSize">
+            <option value="80mm">Thermal receipt 80 mm (3 inch)</option>
+            <option value="58mm">Thermal receipt 58 mm (2 inch)</option>
+            <option value="A5">A5 (half page)</option>
+            <option value="A4">A4 (full page)</option>
+          </select>
+        </label>
+        <label class="f">Invoice number prefix (max 5 letters)<input data-s="invoicePrefix" maxlength="5" style="text-transform:uppercase"></label>
+        <label class="f span2">Footer message<input data-s="footer"></label>
+        <label class="f">Customer groups (comma separated)<input data-s="groupsText" placeholder="Women, Men"></label>
+        <label class="f">Currency symbol<input data-s="currency" maxlength="3"></label>
+      </div>
+      <p class="muted small" id="nextInvLbl"></p>
+      <div class="row gap"><button class="sec" id="testPrint">Print a test bill</button></div>
+    </div>
+
+    <div class="card">
+      <h3>Backup &amp; data</h3>
+      <p class="muted small">The app saves automatically after every change and keeps a daily backup copy for 60 days. To be extra safe, export a backup to a pen drive or Google Drive once a week.</p>
+      <div class="row gap wrap">
+        <button class="pri" id="bkExport">Export full backup</button>
+        <input type="file" id="bkFile" accept=".json,application/json" class="hidden">
+        <button class="sec" id="bkImport">Restore / import setup file</button>
+        <button class="ghost" id="openData">Open data folder</button>
+      </div>
+      <p class="muted small" id="dataDirLbl"></p>
+    </div>
+    <div class="row gap"><span class="grow"></span><button class="pri big" id="saveSettings">Save settings</button></div>
+  </div>
+</section>
+</main>
+
+<!-- Setup wizard -->
+<div id="setup" class="overlay hidden">
+  <div class="modal wide">
+    <div class="row center gap"><img src="icon.png" style="width:44px;height:44px"><h2>Welcome to Billora</h2></div>
+    <p class="muted">Let's set up your business. You can change everything later in Settings.</p>
+    <div class="grid2">
+      <label class="f span2">Business / salon name *<input id="suName"></label>
+      <label class="f span2">Address<textarea id="suAddr" rows="2"></textarea></label>
+      <label class="f">Phone<input id="suPhone"></label>
+      <label class="f">GSTIN (leave empty if none)<input id="suGstin" maxlength="15" style="text-transform:uppercase"></label>
+      <label class="f span2">GST
+        <select id="suGst">
+          <option value="inclusive">Prices already include GST</option>
+          <option value="exclusive">Add GST on top of prices</option>
+          <option value="none" selected>No GST</option>
+        </select>
+      </label>
+      <label class="f span2">Customer groups for your menu
+        <select id="suGroups">
+          <option value="Women,Men">Women & Men (unisex salon)</option>
+          <option value="Men">Men only</option>
+          <option value="Women">Women only</option>
+          <option value="General">Single menu</option>
+        </select>
+      </label>
+      <label class="chk span2"><input type="checkbox" id="suSample" checked> Add a few sample services to start (edit prices later)</label>
+    </div>
+    <div class="row gap">
+      <input type="file" id="suFile" accept=".json,application/json" class="hidden">
+      <button class="ghost" id="suImport">I have a setup / backup file</button>
+      <span class="grow"></span>
+      <button class="pri big" id="suGo">Start billing</button>
+    </div>
+  </div>
+</div>
+
+<div id="modal" class="overlay hidden"><div class="modal" id="modalBox"></div></div>
+<div id="toast"></div>
+<iframe id="printFrame" title="print"></iframe>
+<script src="app.js"></script>
+</body>
+</html>

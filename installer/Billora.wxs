@@ -1,0 +1,73 @@
+<!--
+  Billora MSI installer (WiX Toolset 5). Build with build-installer.bat -> dist\Billora-Setup-<version>.msi
+  - Per-user install: no admin rights / UAC; goes to %LOCALAPPDATA%\Programs\Billora.
+  - Start menu + desktop shortcuts, uninstall entry in Windows Settings, "Launch Billora" at the end.
+  - Installing a newer version upgrades the old one in place (same UpgradeCode, MajorUpgrade).
+  - Bills/data in %APPDATA%\Billora (or BilloraData\) are never touched by install, update or uninstall.
+  MSI chosen over Inno Setup because K7 antivirus deletes Inno's setup-loader stub.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <!-- Never change UpgradeCode: Windows uses it to recognise updates of Billora. -->
+  <Package Name="Billora" Manufacturer="Billora" Version="$(var.Version)"
+           UpgradeCode="6EDB5C67-F530-42D4-87C9-E5634ECF21F8"
+           Scope="perUser" Language="1033" Compressed="yes">
+    <SummaryInformation Description="Billora - Billing &amp; Business Management" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Billora is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Icon Id="BilloraIcon" SourceFile="icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="BilloraIcon" />
+    <!-- ARPNOMODIFY is already set by WixUI_InstallDir. -->
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPCOMMENTS" Value="Offline billing for salons and service businesses" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsDir" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Billora" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+
+    <!-- Per-user components use an HKCU value as key path (Windows Installer rule). -->
+    <Component Id="MainExe" Directory="INSTALLFOLDER" Guid="9F3A9C1E-5B7D-4E2A-9C61-2D7F0B4E8A11">
+      <File Id="BilloraExe" Source="dist\Billora.exe" />
+      <RegistryValue Root="HKCU" Key="Software\Billora" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+      <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+      <RemoveFolder Id="RemoveProgramsDir" Directory="ProgramsDir" On="uninstall" />
+    </Component>
+    <Component Id="StartMenuShortcut" Directory="ProgramMenuFolder" Guid="4C2E8B7A-1D3F-4A6B-8E5C-7F9A0B1C2D33">
+      <Shortcut Id="StartMenuBillora" Name="Billora" Description="Billing &amp; Business Management"
+                Target="[INSTALLFOLDER]Billora.exe" WorkingDirectory="INSTALLFOLDER" Icon="BilloraIcon" />
+      <RegistryValue Root="HKCU" Key="Software\Billora" Name="StartMenuShortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+    <Component Id="DesktopShortcut" Directory="DesktopFolder" Guid="7B1D4E9C-2A5F-4C8E-9D3B-6E0F1A2B3C44">
+      <Shortcut Id="DesktopBillora" Name="Billora" Description="Billing &amp; Business Management"
+                Target="[INSTALLFOLDER]Billora.exe" WorkingDirectory="INSTALLFOLDER" Icon="BilloraIcon" />
+      <RegistryValue Root="HKCU" Key="Software\Billora" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Feature Id="Main" Title="Billora">
+      <ComponentRef Id="MainExe" />
+      <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="DesktopShortcut" />
+    </Feature>
+
+    <!-- Wizard: Welcome -> Ready to install -> Progress -> Finish (with "Launch Billora"). -->
+    <WixVariable Id="WixUIDialogBmp" Value="installer\dialog.bmp" />
+    <WixVariable Id="WixUIBannerBmp" Value="installer\banner.bmp" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <UI>
+      <!-- Skip the licence and folder pages (per-user install always goes to the same place). -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Order="99" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="99" Condition="NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchBillora"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Billora" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#BilloraExe]" />
+    <CustomAction Id="LaunchBillora" BinaryRef="Wix4UtilCA_X64" DllEntry="WixShellExec" Impersonate="yes" />
+  </Package>
+</Wix>
