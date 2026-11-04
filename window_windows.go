@@ -170,6 +170,11 @@ func runNativeWindow(url string) bool {
 	wv = edge.NewChromium()
 	wv.DataPath = filepath.Join(dataDir, "webview")
 	wv.MessageCallback = onWebMessage
+	// Developer testing only: BILLORA_DEVTOOLS_PORT lets an automated test drive the real window
+	// over Chrome DevTools Protocol on 127.0.0.1. Never set on customer PCs.
+	if dbg := envDigits("BILLORA_DEVTOOLS_PORT", ""); dbg != "" {
+		wv.AdditionalBrowserArgs = []string{"--remote-debugging-port=" + dbg, "--remote-allow-origins=http://127.0.0.1:" + dbg}
+	}
 	wv.SetErrorCallback(func(err error) {
 		logError("webview: " + err.Error())
 		if !wvReady {

@@ -82,17 +82,17 @@ type bitmapInfoHeader struct {
 }
 
 var (
-	splashHwnd       uintptr
-	splashCB         = syscall.NewCallback(splashProc)
-	spW, spH         int32
-	spBgDC, spBgBmp  uintptr
-	spOldBg, spFont  uintptr
-	spStart          time.Time
-	spReadyAt        time.Time
-	spTarget, spCur  float64
-	spText           = "Starting Billora..."
-	spReady          bool
-	mainShown        bool
+	splashHwnd      uintptr
+	splashCB        = syscall.NewCallback(splashProc)
+	spW, spH        int32
+	spBgDC, spBgBmp uintptr
+	spOldBg, spFont uintptr
+	spStart         time.Time
+	spReadyAt       time.Time
+	spTarget, spCur float64
+	spText          = "Starting Billora..."
+	spReady         bool
+	mainShown       bool
 )
 
 // showSplash draws the launch screen immediately. Any failure just means no splash.
@@ -231,7 +231,7 @@ func paintSplash(hwnd uintptr) {
 	pDeleteObject.Call(track)
 
 	oldFont, _, _ := pSelectObject.Call(mem, spFont)
-	pSetBkMode.Call(mem, 1)              // transparent
+	pSetBkMode.Call(mem, 1)             // transparent
 	pSetTextColor.Call(mem, 0x00442A1F) // #1f2a44
 	txt, _ := windows.UTF16PtrFromString(spText)
 	tr := winRect{l, spH * 832 / 1000, l + w, bt - 2}

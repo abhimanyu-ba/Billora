@@ -17,7 +17,7 @@ const normPhone = p => String(p || '').replace(/\D/g, '').replace(/^(91|0)(?=\d{
 
 const DEFAULT_SETTINGS = {
   shopName: '', legalName: '', address: '', phone: '', email: '', gstin: '',
-  stateName: '', stateCode: '', gstMode: 'none', gstRate: 18, sac: '9997',
+  stateName: '', stateCode: '', gstMode: 'none', gstRate: 5, sac: '9997',
   invoicePrefix: 'INV', billSize: '80mm', showLogo: true, footer: 'Thank you! Visit again.',
   logo: '', groups: ['Women', 'Men'], currency: '₹', setupDone: false
 };
@@ -29,7 +29,9 @@ const SAMPLE = {
   General: [['Hair', 'Hair Cut', 200], ['Hair', 'Hair Wash', 100], ['Skin', 'Facial', 1000], ['Skin', 'Threading', 50]]
 };
 
-const S = { settings: {...DEFAULT_SETTINGS}, services: [], staff: [], bills: [] };
+// products: [{id, name, brand, cat, code (barcode/SKU), hsn, price (rupees), gstRate ('' = use default), stock, low, active}]
+const S = { settings: {...DEFAULT_SETTINGS}, services: [], staff: [], bills: [], products: [] };
+const COLLECTIONS = ['settings', 'services', 'staff', 'bills', 'products'];
 
 /* ---------------- storage ---------------- */
 async function api(path, body) {
@@ -48,6 +50,7 @@ async function load() {
   S.services = d.services || [];
   S.staff = d.staff || [];
   S.bills = d.bills || [];
+  S.products = d.products || [];
 }
 setInterval(() => fetch('/api/ping').catch(() => {}), 5000);
 fetch('/api/ping').catch(() => {});
@@ -124,24 +127,41 @@ function rangeSeg(el, fromEl, toEl, cb, def = 'today') {
 const billsIn = (from, to, all) => S.bills.filter(b => { const k = b.date.slice(0, 10); return k >= from && k <= to && (all || b.status !== 'cancelled'); });
 
 /* ---------------- money math (all paise) ---------------- */
+// Each item may carry its own gstRate (products); otherwise the bill's default `rate` applies.
+// The bill discount is shared across lines by value (the biggest line takes the rounding
+// remainder), then each line is taxed. Returns per-line figures (`lines`, same order as
+// items) and per-rate totals (`taxes`) so mixed-rate bills and HSN summaries are exact.
+const itemRate = (i, rate) => (i.gstRate === '' || i.gstRate == null) ? (+rate || 0) : (+i.gstRate || 0);
 function calc(items, discType, discVal, mode, rate) {
-  const gross = items.reduce((s, i) => s + toP(i.price) * (+i.qty || 0), 0);
+  const g = items.map(i => toP(i.price) * (+i.qty || 0));
+  const gross = g.reduce((s, x) => s + x, 0);
   let discount = discType === 'pct' ? Math.round(gross * Math.min(100, +discVal || 0) / 100) : Math.min(gross, toP(discVal));
   discount = Math.max(0, discount);
-  const net = gross - discount;
-  let taxable = net, cgst = 0, sgst = 0, total = net;
-  rate = +rate || 0;
-  if (mode === 'inclusive' && rate > 0) {
-    // CGST and SGST must be equal: round each half once, and let the taxable value take
-    // the odd paisa so taxable + CGST + SGST is still exactly the price paid.
-    cgst = sgst = Math.round(net * rate / (2 * (100 + rate)));
-    taxable = net - cgst - sgst; total = net;
-  } else if (mode === 'exclusive' && rate > 0) {
-    cgst = Math.round(net * rate / 200); sgst = cgst; total = net + cgst + sgst;
-  }
+  const big = g.indexOf(Math.max(0, ...g));
+  const d = g.map((x, k) => k === big ? 0 : (gross ? Math.round(discount * x / gross) : 0));
+  if (big >= 0) d[big] = discount - d.reduce((s, x) => s + x, 0);
+  let net = 0, taxable = 0, cgst = 0;
+  const byRate = {};
+  const lines = items.map((it, k) => {
+    const n = g[k] - d[k], r = mode === 'none' ? 0 : itemRate(it, rate);
+    let c = 0, tx = n;
+    if (r > 0 && mode === 'inclusive') {
+      // CGST and SGST must be equal: round each half once, and let the taxable value take
+      // the odd paisa so taxable + CGST + SGST is still exactly the price paid.
+      c = Math.round(n * r / (2 * (100 + r))); tx = n - 2 * c;
+    } else if (r > 0 && mode === 'exclusive') c = Math.round(n * r / 200);
+    net += n; taxable += tx; cgst += c;
+    if (r > 0) { const b = byRate[r] = byRate[r] || {rate: r, taxable: 0, cgst: 0, sgst: 0}; b.taxable += tx; b.cgst += c; b.sgst += c; }
+    return {rate: r, taxable: tx, cgst: c, sgst: c};
+  });
+  const total = mode === 'exclusive' ? net + 2 * cgst : net;
   const grand = Math.round(total / 100) * 100;
-  return {gross, discount, taxable, cgst, sgst, tax: cgst + sgst, total, roundOff: grand - total, grand};
+  return {gross, discount, taxable, cgst, sgst: cgst, tax: 2 * cgst, total, roundOff: grand - total, grand,
+    lines, taxes: Object.values(byRate).sort((a, b) => a.rate - b.rate)};
 }
+// GST lines of a saved bill; old bills (before per-item rates) have no `taxes`.
+const billTaxes = b => b.taxes || (b.gstMode !== 'none' && b.gstRate > 0 ? [{rate: b.gstRate, taxable: b.taxable, cgst: b.cgst, sgst: b.sgst}] : []);
+const hasGST = b => b.gstMode !== 'none' && billTaxes(b).length > 0;
 
 /* ---------------- invoice numbers ---------------- */
 function fyOf(d) { const y = d.getFullYear(), m = d.getMonth(); const s = m >= 3 ? y : y - 1; return `${pad(s % 100)}-${pad((s + 1) % 100)}`; }
@@ -153,14 +173,27 @@ function nextInvoice(date = new Date()) {
 }
 
 /* ================= NEW BILL ================= */
-let cart = [], group = 'All', cat = 'All';
+let cart = [], group = 'All', cat = 'All', pick = 'svc'; // pick: 'svc' | 'prod' (what the grid shows)
 const groups = () => (S.settings.groups && S.settings.groups.length ? S.settings.groups : ['General']);
 const activeSvcs = () => S.services.filter(s => s.active !== false);
+const activeProds = () => S.products.filter(p => p.active !== false);
+const prodRate = p => (p.gstRate === '' || p.gstRate == null) ? '' : +p.gstRate; // '' = bill default
+const stockOf = p => +p.stock || 0;
+const lowOf = p => (p.low === '' || p.low == null) ? 3 : +p.low;
+
+function renderPick() {
+  $('#pickMode').classList.toggle('hidden', !activeProds().length && pick === 'svc');
+  $('#pickMode').querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === pick));
+  $('#svcSearch').placeholder = pick === 'prod'
+    ? 'Search product or scan barcode…  (F2)  — Enter adds the first match'
+    : 'Search service…  (F2)  — press Enter to add the first match';
+}
+segInit($('#pickMode'), v => { pick = v; cat = 'All'; $('#svcSearch').value = ''; renderPick(); renderGroupBtns(); renderCats(); renderGrid(); $('#svcSearch').focus(); });
 
 function renderGroupBtns() {
   const g = groups();
   const el = $('#groupBtns');
-  if (g.length < 2) { el.classList.add('hidden'); group = 'All'; return; }
+  if (g.length < 2 || pick === 'prod') { el.classList.add('hidden'); if (g.length < 2) group = 'All'; return; }
   el.classList.remove('hidden');
   if (!['All', ...g].includes(group)) group = 'All';
   el.innerHTML = ['All', ...g].map(x => `<button data-v="${esc(x)}" class="${x === group ? 'on' : ''}">${esc(x)}</button>`).join('');
@@ -169,11 +202,15 @@ segInit($('#groupBtns'), v => { group = v; cat = 'All'; renderCats(); renderGrid
 
 function svcFiltered() {
   const q = $('#svcSearch').value.trim().toLowerCase();
+  if (pick === 'prod') return activeProds().filter(p => q
+    ? (p.name + ' ' + (p.brand || '') + ' ' + (p.cat || '') + ' ' + (p.code || '')).toLowerCase().includes(q)
+    : (cat === 'All' || (p.cat || 'Products') === cat));
   return activeSvcs().filter(s => (group === 'All' || s.group === group)
     && (q ? (s.name + ' ' + s.cat + ' ' + s.group).toLowerCase().includes(q) : (cat === 'All' || s.cat === cat)));
 }
 function renderCats() {
-  const cats = [...new Set(activeSvcs().filter(s => group === 'All' || s.group === group).map(s => s.cat))];
+  const cats = pick === 'prod' ? [...new Set(activeProds().map(p => p.cat || 'Products'))]
+    : [...new Set(activeSvcs().filter(s => group === 'All' || s.group === group).map(s => s.cat))];
   if (!['All', ...cats].includes(cat)) cat = 'All';
   $('#catChips').innerHTML = ['All', ...cats].map(c => `<button data-c="${esc(c)}" class="${c === cat ? 'on' : ''}">${esc(c)}</button>`).join('');
 }
@@ -183,6 +220,15 @@ $('#catChips').addEventListener('click', e => {
 });
 function renderGrid() {
   const list = svcFiltered();
+  if (pick === 'prod') {
+    $('#svcGrid').innerHTML = list.map(p => { const s = stockOf(p);
+      return `<button class="svc prod${s <= 0 ? ' out' : ''}" data-pid="${p.id}">
+        <span class="c">${esc([p.brand, p.cat].filter(Boolean).join(' · ') || 'Product')}</span>
+        <span class="n">${esc(p.name)}</span>
+        <span class="p">${money0(toP(p.price))}<span class="stk${s <= 0 ? ' none' : s <= lowOf(p) ? ' low' : ''}">${s <= 0 ? 'Out of stock' : s + ' in stock'}</span></span></button>`; }).join('')
+      || `<div class="empty">No products found. Add them in the <b>Products</b> tab.</div>`;
+    return;
+  }
   const showG = group === 'All' && groups().length > 1;
   $('#svcGrid').innerHTML = list.map(s => `<button class="svc" data-id="${s.id}">
       ${showG ? `<span class="g">${esc(s.group)}</span>` : ''}
@@ -190,13 +236,35 @@ function renderGrid() {
       <span class="p">${s.price ? money0(toP(s.price)) : 'Enter price'}${s.max ? ' – ' + money0(toP(s.max)) : ''}</span></button>`).join('')
     || `<div class="empty">No services found. Add them in the <b>Services</b> tab.</div>`;
 }
-$('#svcGrid').addEventListener('click', e => { const b = e.target.closest('.svc'); if (b) addToCart(S.services.find(s => s.id === b.dataset.id)); });
+$('#svcGrid').addEventListener('click', e => {
+  const b = e.target.closest('.svc'); if (!b) return;
+  if (b.dataset.pid) addProduct(S.products.find(p => p.id === b.dataset.pid));
+  else addToCart(S.services.find(s => s.id === b.dataset.id));
+});
 $('#svcSearch').addEventListener('input', renderGrid);
 $('#svcSearch').addEventListener('keydown', e => {
-  if (e.key === 'Enter') { const f = svcFiltered()[0]; if (f) { addToCart(f); e.target.select(); } }
+  if (e.key === 'Enter') {
+    // A barcode scanner types the code + Enter: an exact code match adds that product from either view.
+    const q = e.target.value.trim().toLowerCase();
+    const byCode = q && activeProds().find(p => p.code && String(p.code).toLowerCase() === q);
+    if (byCode) { addProduct(byCode); e.target.value = ''; renderGrid(); return; }
+    const f = svcFiltered()[0];
+    if (f) { pick === 'prod' ? addProduct(f) : addToCart(f); e.target.select(); }
+  }
   if (e.key === 'Escape') { e.target.value = ''; renderGrid(); }
 });
 
+function addProduct(p) {
+  if (!p) return;
+  const ex = cart.find(c => c.pid === p.id);
+  if (ex) ex.qty++;
+  else cart.push({key: uid(), pid: p.id, kind: 'product', name: p.name, group: '', cat: p.cat || 'Products', price: p.price || 0,
+    qty: 1, staff: '', hsn: p.hsn || '', gstRate: prodRate(p)});
+  const inCart = cart.filter(c => c.pid === p.id).reduce((s, c) => s + c.qty, 0);
+  if (inCart > stockOf(p)) toast(`Only ${Math.max(0, stockOf(p))} × ${p.name} in stock`, true);
+  renderCart();
+  if (!p.price) setTimeout(() => { const i = $$('#cartBody input.pr').pop(); i && (i.focus(), i.select()); }, 30);
+}
 function addToCart(s) {
   if (!s) return;
   const ex = cart.find(c => c.sid === s.id && !s.max && s.price);
@@ -209,8 +277,10 @@ let lastStaff = '';
 function renderCart() {
   const staff = S.staff.filter(s => s.active !== false);
   $('#cartBody').innerHTML = cart.map(c => `<tr data-k="${c.key}">
-    <td><div class="nm">${esc(c.name)}</div><div class="sub">${esc([groups().length > 1 ? c.group : '', c.cat].filter(Boolean).join(' · '))}${c.max ? ` · range ${money0(toP(c.min))}–${money0(toP(c.max))}` : ''}</div></td>
-    <td>${staff.length ? `<select class="st"><option value="">—</option>${staff.map(s => `<option ${s.name === c.staff ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select>` : '<span class="muted small">—</span>'}</td>
+    <td><div class="nm">${esc(c.name)}</div><div class="sub">${c.kind === 'product'
+      ? esc(['Product', c.hsn && 'HSN ' + c.hsn, c.gstRate !== '' && S.settings.gstMode !== 'none' ? c.gstRate + '% GST' : ''].filter(Boolean).join(' · '))
+      : esc([groups().length > 1 ? c.group : '', c.cat].filter(Boolean).join(' · '))}${c.max ? ` · range ${money0(toP(c.min))}–${money0(toP(c.max))}` : ''}</div></td>
+    <td>${staff.length ? `<select class="st"><option value="">—</option>${staff.map(s => `<option ${s.name === c.staff ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}<option value="__add">+ Add staff…</option></select>` : '<button class="link addst" title="Add a staff member">+ Add</button>'}</td>
     <td><input class="qt num" type="number" min="1" step="1" value="${c.qty}"></td>
     <td><input class="pr num" type="number" min="0" step="1" value="${c.price}"></td>
     <td class="amt">${fmtN(toP(c.price) * c.qty)}</td>
@@ -227,9 +297,15 @@ $('#cartBody').addEventListener('input', e => {
 });
 $('#cartBody').addEventListener('change', e => {
   if (!e.target.classList.contains('st')) return;
-  const c = cart.find(x => x.key === e.target.closest('tr').dataset.k); c.staff = lastStaff = e.target.value;
+  const c = cart.find(x => x.key === e.target.closest('tr').dataset.k);
+  if (e.target.value === '__add') { e.target.value = c.staff || ''; return staffNameBox('', async n => { if (await addStaff(n)) { c.staff = lastStaff = n; renderCart(); } }); }
+  c.staff = lastStaff = e.target.value;
 });
 $('#cartBody').addEventListener('click', e => {
+  if (e.target.classList.contains('addst')) {
+    const c = cart.find(x => x.key === e.target.closest('tr').dataset.k);
+    return staffNameBox('', async n => { if (await addStaff(n)) { c.staff = lastStaff = n; renderCart(); } });
+  }
   if (!e.target.classList.contains('x')) return;
   cart = cart.filter(x => x.key !== e.target.closest('tr').dataset.k); renderCart();
 });
@@ -244,7 +320,7 @@ $('#addCustom').onclick = () => {
       cart.push({key: uid(), sid: '', name: n, group: '', cat: 'Other', price: Math.max(0, +b.querySelector('#cuP').value || 0), qty: 1, staff: lastStaff});
       closeModal(); renderCart(); };
     b.querySelector('#cuOk').onclick = ok;
-    b.querySelector('#cuP').onkeydown = e => e.key === 'Enter' && ok();
+    b.querySelector('#cuP').onkeydown = e => { if (e.key === 'Enter') ok(); }; // braces: returning false would block typing
   });
 };
 
@@ -257,15 +333,18 @@ function currentCalc() {
   return calc(cart, segVal($('#discType')), $('#discVal').value, st.gstMode || 'none', st.gstRate);
 }
 function renderTotals() {
-  const st = S.settings, t = currentCalc(), r = +st.gstRate || 0;
+  const st = S.settings, t = currentCalc(), incl = st.gstMode === 'inclusive';
   const lines = [['Subtotal', t.gross]];
   if (t.discount) lines.push(['Discount', -t.discount]);
-  if (st.gstMode === 'inclusive' && r) lines.push([`Taxable value`, t.taxable], [`CGST ${r / 2}% (incl.)`, t.cgst], [`SGST ${r / 2}% (incl.)`, t.sgst]);
-  if (st.gstMode === 'exclusive' && r) lines.push([`CGST ${r / 2}%`, t.cgst], [`SGST ${r / 2}%`, t.sgst]);
+  if (t.taxes.length) {
+    if (incl) lines.push(['Taxable value', t.taxable]);
+    for (const x of t.taxes) lines.push([`CGST ${x.rate / 2}%${incl ? ' (incl.)' : ''}`, x.cgst], [`SGST ${x.rate / 2}%${incl ? ' (incl.)' : ''}`, x.sgst]);
+  }
   if (t.roundOff) lines.push(['Round off', t.roundOff]);
   $('#totLines').innerHTML = lines.map(([k, v]) => `<div><span>${k}</span><span>${v < 0 ? '−' : ''}${money(Math.abs(v))}</span></div>`).join('');
   $('#grand').textContent = money(t.grand);
-  $('#gstModeLbl').textContent = st.gstMode === 'inclusive' ? `Prices include ${r}% GST` : st.gstMode === 'exclusive' ? `+${r}% GST added` : 'No GST';
+  const rates = t.taxes.length ? t.taxes.map(x => x.rate).join(' / ') : (+st.gstRate || 0);
+  $('#gstModeLbl').textContent = incl ? `Prices include ${rates}% GST` : st.gstMode === 'exclusive' ? `+${rates}% GST added` : 'No GST';
   renderChange();
 }
 function renderChange() {
@@ -311,7 +390,7 @@ $('#btnClear').onclick = async () => { if (!cart.length || await confirmBox('Cle
 let saving = false;
 async function saveBill(print, wa) {
   if (saving) return;
-  if (!cart.length) return toast('Add at least one service', true);
+  if (!cart.length) return toast('Add at least one service or product', true);
   const ph = normPhone($('#cPhone').value);
   if ($('#cPhone').value && ph.length !== 10) return toast('Mobile number should be 10 digits', true);
   if (wa && ph.length !== 10) { $('#cPhone').focus(); return toast('Enter the customer mobile to send on WhatsApp', true); }
@@ -325,22 +404,40 @@ async function saveBill(print, wa) {
   } else pay[mode.toLowerCase()] = t.grand;
   saving = true;
   const now = new Date(); const inv = nextInvoice(now);
+  const {lines, ...tot} = t;
   const bill = {
     id: uid(), no: inv.no, fy: inv.fy, seq: inv.seq, date: now.toISOString(),
     customer: {name: $('#cName').value.trim(), phone: ph},
-    items: cart.map(c => ({sid: c.sid, name: c.name, group: c.group, cat: c.cat, price: toP(c.price), qty: c.qty, staff: c.staff || ''})),
+    items: cart.map((c, k) => ({
+      ...(c.kind === 'product' ? {pid: c.pid, kind: 'product', hsn: c.hsn || ''} : {sid: c.sid}),
+      name: c.name, group: c.group, cat: c.cat, price: toP(c.price), qty: c.qty, staff: c.staff || '',
+      gstRate: lines[k].rate, taxable: lines[k].taxable, cgst: lines[k].cgst, sgst: lines[k].sgst})),
     discType: segVal($('#discType')), discVal: +$('#discVal').value || 0,
-    ...t, gstMode: st.gstMode || 'none', gstRate: +st.gstRate || 0,
+    ...tot, gstMode: st.gstMode || 'none', gstRate: +st.gstRate || 0,
     pay, received: toP($('#received').value), notes: $('#bNotes').value.trim(), status: 'ok'
   };
   S.bills.push(bill);
   try { await save('bills'); }
   catch (e) { S.bills.pop(); saving = false; return; }
   saving = false;
+  if (bill.items.some(i => i.pid)) moveStock(bill, -1);
   toast(`Saved ${bill.no} · ${money(bill.grand)}`);
   if (print) printBill(bill);
   if (wa) whatsapp(bill);
   clearBill();
+}
+// Stock goes down when a bill is saved (dir -1) and back up when it is cancelled (dir +1).
+async function moveStock(bill, dir) {
+  let changed = false;
+  for (const i of bill.items) {
+    const p = i.pid && S.products.find(x => x.id === i.pid);
+    if (p) { p.stock = stockOf(p) + dir * (+i.qty || 0); changed = true; }
+  }
+  if (!changed) return;
+  try { await save('products'); } catch (e) { /* toast shown by save() */ }
+  if (pick === 'prod') renderGrid();
+  const low = dir < 0 && bill.items.map(i => S.products.find(x => x.id === i.pid)).filter(p => p && stockOf(p) <= lowOf(p));
+  if (low && low.length) setTimeout(() => toast('Low stock: ' + low.map(p => `${p.name} (${stockOf(p)})`).join(', '), true), 2300);
 }
 $('#btnSave').onclick = () => saveBill(false);
 $('#btnSaveWa').onclick = () => saveBill(false, true);
@@ -349,27 +446,31 @@ $('#btnSavePrint').onclick = () => saveBill(true);
 /* ================= PRINT ================= */
 // Bill totals lines shared by both layouts: [label, paise].
 function billTotals(b) {
-  const r = b.gstRate, gst = b.gstMode !== 'none' && r > 0;
   const tl = [['Subtotal', b.gross]];
   if (b.discount) tl.push([`Discount${b.discType === 'pct' ? ` (${b.discVal}%)` : ''}`, -b.discount]);
-  if (gst) { tl.push(['Taxable value', b.taxable], [`CGST @ ${r / 2}%`, b.cgst], [`SGST @ ${r / 2}%`, b.sgst]); }
+  if (hasGST(b)) {
+    tl.push(['Taxable value', b.taxable]);
+    for (const x of billTaxes(b)) tl.push([`CGST @ ${x.rate / 2}%`, x.cgst], [`SGST @ ${x.rate / 2}%`, x.sgst]);
+  }
   if (b.roundOff) tl.push(['Round off', b.roundOff]);
   return tl;
 }
+const isProduct = i => i.kind === 'product';
 const payText = b => b.pay.mode === 'Split' ? ['cash', 'upi', 'card'].filter(k => b.pay[k]).map(k => `${k.toUpperCase()} ${fmtN(b.pay[k])}`).join(' + ') : b.pay.mode;
 
 // Thermal receipt (80 mm / 58 mm). Used for printing, the on-screen preview and the WhatsApp
 // picture. Paper version is pure black (thermal printers can't do grey); image=true swaps the
 // black accent for navy and keeps the logo in colour.
 function thermalBillHTML(b, size, forPrint, image) {
-  const st = S.settings, r = b.gstRate, gst = b.gstMode !== 'none' && r > 0;
+  const st = S.settings, gst = hasGST(b);
   const ac = image ? '#16306e' : '#000';
   const page = size === '58mm'
     ? '@page{size:58mm auto;margin:1.5mm 2mm}body{width:52mm;font-size:10.5px}'
     : '@page{size:80mm auto;margin:2mm 3mm}body{width:72mm;font-size:12px}';
   const qty = b.items.reduce((s, i) => s + (+i.qty || 0), 0);
+  const mixed = billTaxes(b).length > 1, hasSvc = b.items.some(i => !isProduct(i)), hasProd = b.items.some(isProduct);
   const items = b.items.map(i => `<div class="li"><div class="ln"><span>${esc(i.name)}</span><span class="am">${fmtN(i.price * i.qty)}</span></div>
-      <div class="sub">${i.qty} × ${fmtN(i.price)}${i.staff ? ` · by ${esc(i.staff)}` : ''}</div></div>`).join('');
+      <div class="sub">${i.qty} × ${fmtN(i.price)}${isProduct(i) && i.hsn ? ` · HSN ${esc(i.hsn)}` : ''}${gst && mixed && i.gstRate ? ` · GST ${i.gstRate}%` : ''}${i.staff ? ` · by ${esc(i.staff)}` : ''}</div></div>`).join('');
   const tl = billTotals(b);
   const totals = tl.length > 1 ? tl.map(([k, v]) => `<div class="kv"><span>${k}</span><span>${v < 0 ? '−' : ''}${fmtN(Math.abs(v))}</span></div>`).join('') : '';
   const change = b.received > b.grand && b.pay.mode === 'Cash'
@@ -417,7 +518,7 @@ function thermalBillHTML(b, size, forPrint, image) {
     ${totals}
     <div class="gt"><span>TOTAL</span><span class="a">${cur()}${fmtN(b.grand)}</span></div>
     <div class="kv"><span>Paid via</span><b>${esc(payText(b))}</b></div>${change}
-    ${gst && st.sac ? `<div class="kv"><span>SAC code</span><span>${esc(st.sac)}</span></div>` : ''}
+    ${gst && st.sac && hasSvc ? `<div class="kv"><span>SAC code${hasProd ? ' (services)' : ''}</span><span>${esc(st.sac)}</span></div>` : ''}
     ${b.discount ? `<div class="save">You saved ${cur()}${fmtN(b.discount)} today!</div>` : ''}
     ${b.notes ? `<div class="nt">Note: ${esc(b.notes)}</div>` : ''}
     ${st.footer ? `<div class="rule"></div><div class="ft">${esc(st.footer)}</div>` : ''}
@@ -428,10 +529,10 @@ function billHTML(b, forPrint = true, sizeOverride = '', image = false) {
   const st = S.settings, size = sizeOverride || st.billSize || '80mm';
   if (size.endsWith('mm')) return thermalBillHTML(b, size, forPrint, image);
   // A5 / A4 invoice
-  const r = b.gstRate, gst = b.gstMode !== 'none' && r > 0;
+  const gst = hasGST(b), mixed = billTaxes(b).length > 1;
   const title = gst ? 'TAX INVOICE' : 'BILL';
   const itemRows = b.items.map((i, n) =>
-    `<tr><td>${n + 1}</td><td>${esc(i.name)}${i.staff ? `<div class="stf">by ${esc(i.staff)}</div>` : ''}</td><td class="c">${esc(st.sac || '')}</td><td class="r">${i.qty}</td><td class="r">${fmtN(i.price)}</td><td class="r">${fmtN(i.price * i.qty)}</td></tr>`).join('');
+    `<tr><td>${n + 1}</td><td>${esc(i.name)}${i.staff ? `<div class="stf">by ${esc(i.staff)}</div>` : ''}${gst && mixed && i.gstRate ? `<div class="stf">GST ${i.gstRate}%</div>` : ''}</td><td class="c">${esc(isProduct(i) ? (i.hsn || '') : (st.sac || ''))}</td><td class="r">${i.qty}</td><td class="r">${fmtN(i.price)}</td><td class="r">${fmtN(i.price * i.qty)}</td></tr>`).join('');
   const totRows = billTotals(b).map(([k, v]) => `<tr><td colspan="5" class="r">${k}</td><td class="r">${v < 0 ? '-' : ''}${fmtN(Math.abs(v))}</td></tr>`).join('');
   const payTxt = payText(b);
   const css = {
@@ -450,7 +551,7 @@ function billHTML(b, forPrint = true, sizeOverride = '', image = false) {
          <td><div class="lbl">Billed to</div><b>${esc(b.customer.name || 'Walk-in customer')}</b>${b.customer.phone ? `<br>${esc(b.customer.phone)}` : ''}</td>
          <td class="r"><div class="lbl">Invoice No</div><b>${esc(b.no)}</b><br>${fmtDate(b.date)} ${fmtTime(b.date)}${gst && st.stateName ? `<br>Place of supply: ${esc(st.stateName)}` : ''}</td></tr></table>`;
   const table =
-      `<table class="itA"><thead><tr><th>#</th><th>Service</th><th class="c">SAC</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead><tbody>${itemRows}</tbody>
+      `<table class="itA"><thead><tr><th>#</th><th>Item</th><th class="c">HSN/SAC</th><th class="r">Qty</th><th class="r">Rate</th><th class="r">Amount</th></tr></thead><tbody>${itemRows}</tbody>
          <tfoot>${totRows}<tr class="gt"><td colspan="5" class="r">TOTAL</td><td class="r">${cur()}${fmtN(b.grand)}</td></tr></tfoot></table>`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(b.no)}</title><style>
     ${css}
@@ -495,7 +596,7 @@ function previewBill(b) {
     m.querySelector('#pvW') && (m.querySelector('#pvW').onclick = () => whatsapp(b));
     m.querySelector('#pvC') && (m.querySelector('#pvC').onclick = async () => {
       if (!(await confirmBox(`Cancel bill <b>${esc(b.no)}</b> (${money(b.grand)})? It stays in records marked as cancelled and is not counted in sales.`, 'Cancel bill'))) return;
-      b.status = 'cancelled'; b.cancelledAt = new Date().toISOString(); await save('bills'); toast('Bill cancelled'); renderBills();
+      b.status = 'cancelled'; b.cancelledAt = new Date().toISOString(); await save('bills'); await moveStock(b, +1); toast('Bill cancelled'); renderBills();
     });
   });
 }
@@ -568,7 +669,7 @@ function renderBills() {
   const sum = k => ok.reduce((s, b) => s + (b[k] || 0), 0);
   $('#billsSummary').innerHTML = [['Bills', ok.length], ['Sales', money(sum('grand'))], ['GST', money(sum('tax'))], ['Discounts', money(sum('discount'))]]
     .map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
-  $('#billsTable').innerHTML = `<thead><tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Mobile</th><th>Services</th><th>Payment</th><th class="r">Total</th><th></th></tr></thead><tbody>` +
+  $('#billsTable').innerHTML = `<thead><tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Mobile</th><th>Items</th><th>Payment</th><th class="r">Total</th><th></th></tr></thead><tbody>` +
     (list.map(b => `<tr class="${b.status === 'cancelled' ? 'cancel' : ''}" data-id="${b.id}">
       <td><b>${esc(b.no)}</b></td><td>${fmtDate(b.date)} <span class="muted small">${fmtTime(b.date)}</span></td>
       <td>${esc(b.customer.name) || '<span class="muted">—</span>'}</td><td>${esc(b.customer.phone)}</td>
@@ -614,26 +715,48 @@ $('#custExport').onclick = () => download('customers.csv', toCSV([['Name', 'Mobi
   ...customers().map(c => [c.name, c.phone, c.visits, (c.spent / 100).toFixed(2), fmtDate(c.first), fmtDate(c.last)])]), 'text/csv');
 
 /* ================= REPORTS ================= */
+// GST split of one bill line. New bills store it per line; older bills are recomputed the same way.
+function itemTax(b, i) {
+  if (i.taxable != null) return {rate: +i.gstRate || 0, taxable: i.taxable, cgst: i.cgst || 0, sgst: i.sgst || 0};
+  const factor = b.gross ? (b.gross - b.discount) / b.gross : 1, n = Math.round(i.price * i.qty * factor);
+  const r = b.gstMode === 'none' ? 0 : (+b.gstRate || 0); let c = 0, tx = n;
+  if (r && b.gstMode === 'inclusive') { c = Math.round(n * r / (2 * (100 + r))); tx = n - 2 * c; }
+  else if (r && b.gstMode === 'exclusive') c = Math.round(n * r / 200);
+  return {rate: r, taxable: tx, cgst: c, sgst: c};
+}
 function repData() {
   const from = $('#rFrom').value, to = $('#rTo').value, list = billsIn(from, to);
   const sum = k => list.reduce((s, b) => s + (b[k] || 0), 0);
   const pay = {Cash: 0, UPI: 0, Card: 0};
   list.forEach(b => { pay.Cash += b.pay.cash || 0; pay.UPI += b.pay.upi || 0; pay.Card += b.pay.card || 0; });
-  const staff = {}, svc = {}, catm = {}, days = {};
+  const staff = {}, svc = {}, prod = {}, catm = {}, days = {}, hsn = {}, rates = {};
+  let svcSales = 0, prodSales = 0, prodQty = 0;
   for (const b of list) {
-    const factor = b.gross ? (b.gross - b.discount) / b.gross : 1;   // share discount across lines
     for (const i of b.items) {
-      const amt = Math.round(i.price * i.qty * factor);
+      const x = itemTax(b, i), amt = x.taxable + x.cgst + x.sgst; // after discount, with GST
       const sk = i.staff || '(not set)';
       staff[sk] = staff[sk] || {n: 0, amt: 0}; staff[sk].n += i.qty; staff[sk].amt += amt;
-      const vk = (i.group ? i.group + ' · ' : '') + i.name;
-      svc[vk] = svc[vk] || {n: 0, amt: 0}; svc[vk].n += i.qty; svc[vk].amt += amt;
+      if (isProduct(i)) {
+        prod[i.name] = prod[i.name] || {n: 0, amt: 0}; prod[i.name].n += i.qty; prod[i.name].amt += amt;
+        prodSales += amt; prodQty += i.qty;
+      } else {
+        const vk = (i.group ? i.group + ' · ' : '') + i.name;
+        svc[vk] = svc[vk] || {n: 0, amt: 0}; svc[vk].n += i.qty; svc[vk].amt += amt; svcSales += amt;
+      }
       const ck = i.cat || 'Other'; catm[ck] = (catm[ck] || 0) + amt;
+      const code = isProduct(i) ? (i.hsn || 'No HSN') : (S.settings.sac || 'SAC'), hk = code + '|' + x.rate;
+      const h = hsn[hk] = hsn[hk] || {code, kind: isProduct(i) ? 'Goods' : 'Services', rate: x.rate, qty: 0, taxable: 0, cgst: 0, sgst: 0};
+      h.qty += i.qty; h.taxable += x.taxable; h.cgst += x.cgst; h.sgst += x.sgst;
+    }
+    for (const t of billTaxes(b)) {
+      const r = rates[t.rate] = rates[t.rate] || {taxable: 0, cgst: 0, sgst: 0};
+      r.taxable += t.taxable; r.cgst += t.cgst; r.sgst += t.sgst;
     }
     const d = b.date.slice(0, 10); days[d] = days[d] || {n: 0, amt: 0, tax: 0}; days[d].n++; days[d].amt += b.grand; days[d].tax += b.tax;
   }
+  const stockAlerts = activeProds().filter(p => stockOf(p) <= lowOf(p)).sort((a, b) => stockOf(a) - stockOf(b));
   return {from, to, list, count: list.length, grand: sum('grand'), tax: sum('tax'), cgst: sum('cgst'), sgst: sum('sgst'), taxable: sum('taxable'),
-    discount: sum('discount'), gross: sum('gross'), pay, staff, svc, catm, days,
+    discount: sum('discount'), gross: sum('gross'), pay, staff, svc, prod, catm, days, hsn, rates, svcSales, prodSales, prodQty, stockAlerts,
     cancelled: billsIn(from, to, true).filter(b => b.status === 'cancelled').length};
 }
 function barRows(obj, valFn, labelFn, limit = 15) {
@@ -645,30 +768,59 @@ function barRows(obj, valFn, labelFn, limit = 15) {
 function renderReports() {
   const d = repData();
   const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  const hasProducts = S.products.length > 0 || d.prodQty > 0;
+  const rateRows = Object.entries(d.rates).sort((a, b) => a[0] - b[0]).map(([r, v]) =>
+    `<tr><td>GST ${r}% <span class="muted small">(CGST ${r / 2}% + SGST ${r / 2}%)</span></td><td class="r">${money(v.taxable)}</td><td class="r">${money(v.cgst + v.sgst)}</td></tr>`).join('');
+  const hsnRows = Object.values(d.hsn).sort((a, b) => a.kind.localeCompare(b.kind) || a.code.localeCompare(b.code) || a.rate - b.rate).map(h =>
+    `<tr><td><b>${esc(h.code)}</b> <span class="muted small">${h.kind}</span></td><td class="r">${h.rate}%</td><td class="r">${h.qty}</td><td class="r">${money(h.taxable)}</td><td class="r">${money(h.cgst)}</td><td class="r">${money(h.sgst)}</td></tr>`).join('');
   $('#repBody').innerHTML = `<div class="summary">${stat('Total sales', money(d.grand))}${stat('Bills', d.count)}${stat('Average bill', money(d.count ? Math.round(d.grand / d.count) : 0))}
+      ${hasProducts ? stat('Services sales', money(d.svcSales)) + stat('Product sales', `${money(d.prodSales)} <span class="muted small">(${d.prodQty} sold)</span>`) : ''}
       ${stat('GST collected', money(d.tax))}${stat('Discounts given', money(d.discount))}${d.cancelled ? stat('Cancelled bills', d.cancelled) : ''}</div>
     <div class="rep-grid">
       <div class="card"><h3>Payment modes</h3><table class="list">${barRows(d.pay, v => v, v => money(v))}</table></div>
       <div class="card"><h3>GST summary</h3><table class="list">
-        <tr><td>Taxable value</td><td class="r">${money(d.taxable)}</td></tr><tr><td>CGST</td><td class="r">${money(d.cgst)}</td></tr>
-        <tr><td>SGST</td><td class="r">${money(d.sgst)}</td></tr><tr><td><b>Total GST</b></td><td class="r"><b>${money(d.tax)}</b></td></tr>
-        <tr><td>Invoice value (incl. GST)</td><td class="r">${money(d.grand)}</td></tr></table></div>
-      <div class="card"><h3>Staff performance</h3><table class="list">${barRows(d.staff, v => v.amt, v => `${v.n} services · ${money0(v.amt)}`)}</table>
-        <p class="muted small">Amounts are after discount, including GST if prices include GST.</p></div>
+        ${rateRows ? `<tr><th>Rate</th><th class="r">Taxable value</th><th class="r">GST</th></tr>${rateRows}` : ''}
+        <tr><td>Taxable value</td><td class="r" colspan="2">${money(d.taxable)}</td></tr>
+        <tr><td>CGST</td><td class="r" colspan="2">${money(d.cgst)}</td></tr><tr><td>SGST</td><td class="r" colspan="2">${money(d.sgst)}</td></tr>
+        <tr><td><b>Total GST</b></td><td class="r" colspan="2"><b>${money(d.tax)}</b></td></tr>
+        <tr><td>Invoice value (incl. GST)</td><td class="r" colspan="2">${money(d.grand)}</td></tr></table></div>
+      <div class="card"><h3>Staff performance</h3><table class="list">${barRows(d.staff, v => v.amt, v => `${v.n} items · ${money0(v.amt)}`)}</table>
+        <p class="muted small">Amounts are after discount and include GST.</p></div>
       <div class="card"><h3>Top services</h3><table class="list">${barRows(d.svc, v => v.amt, v => `${v.n} × · ${money0(v.amt)}`)}</table></div>
+      ${hasProducts ? `<div class="card"><h3>Product sales</h3><table class="list">${barRows(d.prod, v => v.amt, v => `${v.n} sold · ${money0(v.amt)}`, 30)}</table></div>
+      <div class="card"><h3>Stock alerts</h3><table class="list">${d.stockAlerts.map(p => `<tr><td>${esc(p.name)}${p.brand ? ` <span class="muted small">${esc(p.brand)}</span>` : ''}</td>
+        <td class="r">${stockOf(p) <= 0 ? '<span class="pill bad">Out of stock</span>' : `<span class="pill warn">${stockOf(p)} left</span>`}</td></tr>`).join('')
+        || '<tr><td class="empty">All products are in stock</td></tr>'}</table></div>` : ''}
       <div class="card"><h3>By category</h3><table class="list">${barRows(d.catm, v => v, v => money0(v), 30)}</table></div>
+      <div class="card"><h3>HSN / SAC summary <span class="muted small">(for GSTR-1)</span></h3><table class="list">
+        <tr><th>Code</th><th class="r">Rate</th><th class="r">Qty</th><th class="r">Taxable</th><th class="r">CGST</th><th class="r">SGST</th></tr>
+        ${hsnRows || '<tr><td class="empty" colspan="6">No data</td></tr>'}</table></div>
       <div class="card"><h3>Day by day</h3><table class="list"><tr><th>Date</th><th class="r">Bills</th><th class="r">GST</th><th class="r">Sales</th></tr>
         ${Object.entries(d.days).sort().reverse().map(([k, v]) => `<tr><td>${fmtDate(k)}</td><td class="r">${v.n}</td><td class="r">${money0(v.tax)}</td><td class="r"><b>${money0(v.amt)}</b></td></tr>`).join('') || '<tr><td class="empty" colspan="4">No data</td></tr>'}</table></div>
     </div>`;
 }
+const r2 = p => (p / 100).toFixed(2);
+// One row per invoice per GST rate (a bill with 5% services and an 18% product gives two rows).
 $('#rExport').onclick = () => {
-  const d = repData();
+  const d = repData(), pos = (S.settings.stateCode ? S.settings.stateCode + '-' : '') + (S.settings.stateName || '');
+  const rows = [];
+  for (const b of d.list.sort((a, b) => a.date.localeCompare(b.date))) {
+    const taxes = billTaxes(b).length ? billTaxes(b) : [{rate: 0, taxable: b.taxable, cgst: 0, sgst: 0}];
+    const exempt = b.taxable - taxes.reduce((s, t) => s + t.taxable, 0); // lines at 0% inside a GST bill
+    if (exempt && billTaxes(b).length) taxes.push({rate: 0, taxable: exempt, cgst: 0, sgst: 0});
+    taxes.forEach((t, k) => rows.push([b.no, fmtDate(b.date), b.customer.name, b.customer.phone, pos, t.rate,
+      r2(t.taxable), r2(t.cgst), r2(t.sgst), r2(t.cgst + t.sgst), k ? '' : r2(b.roundOff), k ? '' : r2(b.grand)]));
+  }
   download(`gst_sales_${d.from}_to_${d.to}.csv`, toCSV([
-    ['Invoice No', 'Invoice Date', 'Customer', 'Mobile', 'Place of Supply', 'SAC', 'GST Rate %', 'Taxable Value', 'CGST', 'SGST', 'Total GST', 'Round off', 'Invoice Value'],
-    ...d.list.sort((a, b) => a.date.localeCompare(b.date)).map(b => [b.no, fmtDate(b.date), b.customer.name, b.customer.phone,
-      (S.settings.stateCode ? S.settings.stateCode + '-' : '') + (S.settings.stateName || ''), S.settings.sac, b.gstRate,
-      (b.taxable / 100).toFixed(2), (b.cgst / 100).toFixed(2), (b.sgst / 100).toFixed(2), (b.tax / 100).toFixed(2), (b.roundOff / 100).toFixed(2), (b.grand / 100).toFixed(2)]),
-    [], ['TOTAL', '', '', '', '', '', '', (d.taxable / 100).toFixed(2), (d.cgst / 100).toFixed(2), (d.sgst / 100).toFixed(2), (d.tax / 100).toFixed(2), '', (d.grand / 100).toFixed(2)]
+    ['Invoice No', 'Invoice Date', 'Customer', 'Mobile', 'Place of Supply', 'GST Rate %', 'Taxable Value', 'CGST', 'SGST', 'Total GST', 'Round off', 'Invoice Value'],
+    ...rows, [], ['TOTAL', '', '', '', '', '', r2(d.taxable), r2(d.cgst), r2(d.sgst), r2(d.tax), '', r2(d.grand)]
+  ]), 'text/csv');
+};
+$('#rHsn').onclick = () => {
+  const d = repData();
+  download(`hsn_summary_${d.from}_to_${d.to}.csv`, toCSV([
+    ['HSN/SAC', 'Type', 'GST Rate %', 'Quantity', 'Taxable Value', 'CGST', 'SGST', 'Total Value'],
+    ...Object.values(d.hsn).map(h => [h.code, h.kind, h.rate, h.qty, r2(h.taxable), r2(h.cgst), r2(h.sgst), r2(h.taxable + h.cgst + h.sgst)])
   ]), 'text/csv');
 };
 $('#rPrint').onclick = () => {
@@ -682,6 +834,9 @@ $('#rPrint').onclick = () => {
     <tr><td>Discounts</td><td class="r">${money(d.discount)}</td></tr><tr><td>Taxable value</td><td class="r">${money(d.taxable)}</td></tr>
     <tr><td>CGST</td><td class="r">${money(d.cgst)}</td></tr><tr><td>SGST</td><td class="r">${money(d.sgst)}</td></tr>
     ${Object.entries(d.pay).map(([k, v]) => `<tr><td>${k}</td><td class="r">${money(v)}</td></tr>`).join('')}</table>
+    ${d.prodQty ? `<h2>Services &amp; products</h2><table><tr><td>Services sales</td><td class="r">${money(d.svcSales)}</td></tr><tr><td>Product sales (${d.prodQty} sold)</td><td class="r">${money(d.prodSales)}</td></tr></table>
+    <h2>Product sales</h2><table><tr><th>Product</th><th class="r">Qty sold</th><th class="r">Amount</th></tr>${Object.entries(d.prod).sort((a, b) => b[1].amt - a[1].amt).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="r">${v.n}</td><td class="r">${money(v.amt)}</td></tr>`).join('')}</table>` : ''}
+    <h2>HSN / SAC summary</h2><table><tr><th>Code</th><th>Type</th><th class="r">Rate</th><th class="r">Qty</th><th class="r">Taxable</th><th class="r">CGST</th><th class="r">SGST</th></tr>${Object.values(d.hsn).map(h => `<tr><td>${esc(h.code)}</td><td>${h.kind}</td><td class="r">${h.rate}%</td><td class="r">${h.qty}</td><td class="r">${money(h.taxable)}</td><td class="r">${money(h.cgst)}</td><td class="r">${money(h.sgst)}</td></tr>`).join('')}</table>
     <h2>Staff</h2><table>${Object.entries(d.staff).sort((a, b) => b[1].amt - a[1].amt).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="r">${v.n}</td><td class="r">${money(v.amt)}</td></tr>`).join('')}</table>
     <h2>Day by day</h2><table><tr><th>Date</th><th class="r">Bills</th><th class="r">GST</th><th class="r">Sales</th></tr>${Object.entries(d.days).sort().map(([k, v]) => `<tr><td>${fmtDate(k)}</td><td class="r">${v.n}</td><td class="r">${money(v.tax)}</td><td class="r">${money(v.amt)}</td></tr>`).join('')}</table>
     </body></html>`;
@@ -763,6 +918,100 @@ $('#svcImportCsv').onclick = () => {
   inp.click();
 };
 
+/* ================= PRODUCTS TAB ================= */
+function renderProducts() {
+  const q = $('#prodSearch').value.trim().toLowerCase();
+  const all = S.products, st = S.settings;
+  const list = all.filter(p => !q || (p.name + ' ' + (p.brand || '') + ' ' + (p.cat || '') + ' ' + (p.code || '') + ' ' + (p.hsn || '')).toLowerCase().includes(q))
+    .sort((a, b) => (a.cat || '').localeCompare(b.cat || '') || a.name.localeCompare(b.name));
+  const live = all.filter(p => p.active !== false);
+  const value = live.reduce((s, p) => s + toP(p.price) * Math.max(0, stockOf(p)), 0);
+  const stat = (k, v) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`;
+  $('#prodSummary').innerHTML = stat('Products', live.length) + stat('Stock value (at selling price)', money0(value))
+    + stat('Low stock', live.filter(p => stockOf(p) > 0 && stockOf(p) <= lowOf(p)).length) + stat('Out of stock', live.filter(p => stockOf(p) <= 0).length);
+  const gstOn = st.gstMode !== 'none';
+  $('#prodTable').innerHTML = `<thead><tr><th>Product</th><th>Category</th><th>Barcode / code</th><th>HSN</th><th class="r">Price</th>${gstOn ? '<th class="r">GST</th>' : ''}<th class="r">Stock</th><th>Status</th><th></th></tr></thead><tbody>` +
+    (list.map(p => { const s = stockOf(p);
+      return `<tr data-id="${p.id}"><td><b>${esc(p.name)}</b>${p.brand ? `<div class="muted small">${esc(p.brand)}</div>` : ''}</td><td>${esc(p.cat || '')}</td>
+      <td>${esc(p.code || '')}</td><td>${esc(p.hsn || '')}</td><td class="r">${money0(toP(p.price))}</td>
+      ${gstOn ? `<td class="r">${prodRate(p) === '' ? `<span class="muted">${+st.gstRate || 0}%</span>` : prodRate(p) + '%'}</td>` : ''}
+      <td class="r">${s <= 0 ? `<span class="pill bad">${s}</span>` : s <= lowOf(p) ? `<span class="pill warn">${s}</span>` : `<b>${s}</b>`}</td>
+      <td>${p.active === false ? '<span class="pill off">Hidden</span>' : '<span class="pill">Active</span>'}</td>
+      <td class="act"><button class="sec" data-a="stock">+ Stock</button> <button class="sec" data-a="edit">Edit</button> <button class="ghost danger" data-a="del">Delete</button></td></tr>`; }).join('')
+      || `<tr><td colspan="9" class="empty">No products yet. Click “+ Add product” to add shampoo, hair serum and other items you sell.</td></tr>`) + '</tbody>';
+}
+$('#prodSearch').addEventListener('input', renderProducts);
+$('#prodAdd').onclick = () => editProduct(null);
+$('#prodTable').addEventListener('click', async e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const p = S.products.find(x => x.id === b.closest('tr').dataset.id); if (!p) return;
+  if (b.dataset.a === 'edit') editProduct(p);
+  if (b.dataset.a === 'stock') addStock(p);
+  if (b.dataset.a === 'del' && await confirmBox(`Delete <b>${esc(p.name)}</b>? Old bills are not affected.`, 'Delete')) {
+    S.products = S.products.filter(x => x !== p); await save('products'); refreshAll(); toast('Deleted');
+  }
+});
+function editProduct(p) {
+  const isNew = !p, st = S.settings, def = +st.gstRate || 0;
+  p = p || {name: '', brand: '', cat: '', code: '', hsn: '', price: '', gstRate: '', stock: 0, low: 3, active: true};
+  const cats = [...new Set(S.products.map(x => x.cat).filter(Boolean).concat(['Hair Care', 'Skin Care']))];
+  const priceLbl = st.gstMode === 'exclusive' ? 'Selling price ₹ (before GST)' : st.gstMode === 'inclusive' ? 'Selling price ₹ (MRP, incl. GST)' : 'Selling price ₹';
+  const rate = prodRate(p);
+  modal(`<h3>${isNew ? 'Add product' : 'Edit product'}</h3>
+    <div class="grid2">
+      <label class="f span2">Product name *<input id="pN" value="${esc(p.name)}" placeholder="e.g. Anti-dandruff Shampoo 200 ml"></label>
+      <label class="f">Brand<input id="pB" value="${esc(p.brand || '')}"></label>
+      <label class="f">Category<input id="pC" list="pCats" value="${esc(p.cat || '')}" placeholder="Hair Care"><datalist id="pCats">${cats.map(c => `<option value="${esc(c)}">`).join('')}</datalist></label>
+      <label class="f">${priceLbl}<input id="pP" type="number" min="0" step="0.01" class="num" value="${p.price || ''}"></label>
+      <label class="f">GST rate
+        <select id="pG" ${st.gstMode === 'none' ? 'disabled' : ''}>
+          <option value="" ${rate === '' ? 'selected' : ''}>Same as services (${def}%)</option>
+          ${[0, 5, 12, 18, 28].map(r => `<option value="${r}" ${rate === r ? 'selected' : ''}>${r}%</option>`).join('')}
+        </select></label>
+      <label class="f">HSN code<input id="pH" value="${esc(p.hsn || '')}" placeholder="e.g. 3305" maxlength="8"></label>
+      <label class="f">Barcode / product code<input id="pK" value="${esc(p.code || '')}" placeholder="scan or type"></label>
+      <label class="f">${isNew ? 'Opening stock (qty)' : 'Stock in hand (qty)'}<input id="pS" type="number" step="1" class="num" value="${stockOf(p)}"></label>
+      <label class="f">Warn when stock is at or below<input id="pL" type="number" min="0" step="1" class="num" value="${lowOf(p)}"></label>
+      <label class="chk span2"><input type="checkbox" id="pA" ${p.active !== false ? 'checked' : ''}> Show on billing screen</label>
+    </div>
+    <p class="muted small">Check the product's GST rate and HSN code on its purchase invoice, or with your accountant.</p>
+    <div class="row gap"><span class="grow"></span><button class="ghost" id="pX">Cancel</button><button class="pri" id="pOk">Save</button></div>`, m => {
+    m.querySelector(isNew ? '#pN' : '#pP').focus();
+    m.querySelector('#pX').onclick = closeModal;
+    m.querySelector('#pOk').onclick = async () => {
+      const name = m.querySelector('#pN').value.trim(); if (!name) return toast('Enter product name', true);
+      const code = m.querySelector('#pK').value.trim();
+      if (code && S.products.some(x => x !== p && x.code && String(x.code).toLowerCase() === code.toLowerCase())) return toast('Another product already has this barcode', true);
+      const g = m.querySelector('#pG').value;
+      const obj = isNew ? {id: 'p' + uid()} : p;
+      Object.assign(obj, {name, brand: m.querySelector('#pB').value.trim(), cat: m.querySelector('#pC').value.trim() || 'Products', code,
+        hsn: m.querySelector('#pH').value.replace(/\D/g, ''), price: Math.max(0, +m.querySelector('#pP').value || 0),
+        gstRate: g === '' ? '' : +g, stock: parseInt(m.querySelector('#pS').value) || 0,
+        low: Math.max(0, parseInt(m.querySelector('#pL').value) || 0), active: m.querySelector('#pA').checked});
+      if (isNew) S.products.push(obj);
+      await save('products'); closeModal(); refreshAll(); toast('Saved');
+    };
+  });
+}
+// Receive new stock (or correct it with a negative number, e.g. damaged or used in the salon).
+function addStock(p) {
+  modal(`<h3>Update stock · ${esc(p.name)}</h3>
+    <p class="muted">In stock now: <b>${stockOf(p)}</b></p>
+    <label class="f">Quantity to add (use minus for damaged / used items, e.g. -1)<input id="aQ" type="number" step="1" class="num" placeholder="e.g. 12"></label>
+    <div class="row gap"><span class="grow"></span><button class="ghost" id="aX">Cancel</button><button class="pri" id="aOk">Update stock</button></div>`, m => {
+    const q = m.querySelector('#aQ'); q.focus();
+    m.querySelector('#aX').onclick = closeModal;
+    const ok = async () => {
+      const n = parseInt(q.value); if (!n) return toast('Enter a quantity', true);
+      p.stock = stockOf(p) + n; await save('products'); closeModal(); refreshAll();
+      toast(`${p.name}: stock is now ${p.stock}`);
+    };
+    m.querySelector('#aOk').onclick = ok; q.onkeydown = e => { if (e.key === 'Enter') ok(); }; // braces: returning false would block typing
+  });
+}
+$('#prodExport').onclick = () => download('products.csv', toCSV([['Product', 'Brand', 'Category', 'Barcode', 'HSN', 'Price', 'GST %', 'Stock', 'Low stock level', 'Active'],
+  ...S.products.map(p => [p.name, p.brand || '', p.cat || '', p.code || '', p.hsn || '', p.price, prodRate(p) === '' ? '' : prodRate(p), stockOf(p), lowOf(p), p.active === false ? 'No' : 'Yes'])]), 'text/csv');
+
 /* ================= STAFF ================= */
 function renderStaff() {
   $('#staffTable').innerHTML = `<thead><tr><th>Name</th><th>Status</th><th></th></tr></thead><tbody>` +
@@ -770,16 +1019,37 @@ function renderStaff() {
       <td class="act"><button class="sec" data-a="ren">Rename</button> <button class="sec" data-a="tog">${s.active === false ? 'Activate' : 'Deactivate'}</button> <button class="ghost danger" data-a="del">Delete</button></td></tr>`).join('')
       || '<tr><td colspan="3" class="empty">No staff added</td></tr>') + '</tbody>';
 }
-$('#staffAdd').onclick = async () => {
-  const n = $('#staffNew').value.trim(); if (!n) return;
-  if (S.staff.some(s => s.name.toLowerCase() === n.toLowerCase())) return toast('Already exists', true);
-  S.staff.push({name: n, active: true}); $('#staffNew').value = ''; await save('staff'); renderStaff(); renderCart();
-};
+const staffExists = (n, except) => S.staff.some(s => s !== except && String(s.name).toLowerCase() === n.toLowerCase());
+// Adds a staff member; returns true when added (and saved). Used by the Staff tab and the bill.
+async function addStaff(n) {
+  n = String(n || '').trim().replace(/\s+/g, ' ');
+  if (!n) { toast('Enter the staff name', true); return false; }
+  if (staffExists(n)) { toast(`${n} is already in the staff list`, true); return false; }
+  S.staff.push({name: n, active: true});
+  try { await save('staff'); } catch (e) { S.staff.pop(); return false; }
+  renderStaff(); renderCart(); toast(`Added ${n}`);
+  return true;
+}
+// Small dialog asking for a staff name (add or rename). onOk(name) runs when confirmed.
+function staffNameBox(current, onOk) {
+  modal(`<h3>${current ? 'Rename staff' : 'Add staff'}</h3>
+    <label class="f">Staff name<input id="snN" value="${esc(current)}" maxlength="40"></label>
+    <div class="row gap"><span class="grow"></span><button class="ghost" id="snX">Cancel</button><button class="pri" id="snOk">${current ? 'Rename' : 'Add'}</button></div>`, m => {
+    const inp = m.querySelector('#snN'); inp.focus(); inp.select();
+    m.querySelector('#snX').onclick = closeModal;
+    const ok = async () => { const n = inp.value.trim(); if (!n) return toast('Enter the staff name', true); closeModal(); await onOk(n); };
+    m.querySelector('#snOk').onclick = ok; inp.onkeydown = e => { if (e.key === 'Enter') ok(); }; // braces: returning false would block typing
+  });
+}
+$('#staffAdd').onclick = async () => { if (await addStaff($('#staffNew').value)) $('#staffNew').value = ''; $('#staffNew').focus(); };
 $('#staffNew').addEventListener('keydown', e => e.key === 'Enter' && $('#staffAdd').click());
 $('#staffTable').addEventListener('click', async e => {
-  const b = e.target.closest('button'); if (!b) return; const s = S.staff[+b.closest('tr').dataset.i];
+  const b = e.target.closest('button'); if (!b) return; const s = S.staff[+b.closest('tr').dataset.i]; if (!s) return;
+  if (b.dataset.a === 'ren') return staffNameBox(s.name, async n => {
+    if (staffExists(n, s)) return toast(`${n} is already in the staff list`, true);
+    s.name = n; await save('staff'); renderStaff(); renderCart(); toast('Renamed');
+  });
   if (b.dataset.a === 'tog') s.active = s.active === false;
-  if (b.dataset.a === 'ren') { const n = prompt('New name', s.name); if (!n || !n.trim()) return; s.name = n.trim(); }
   if (b.dataset.a === 'del') { if (!(await confirmBox(`Delete ${esc(s.name)}? Their old bills keep the name.`, 'Delete'))) return; S.staff.splice(S.staff.indexOf(s), 1); }
   await save('staff'); renderStaff(); renderCart();
 });
@@ -838,11 +1108,11 @@ async function importBackup(file) {
   if (!['billora-backup', 'salon-billing-backup'].includes(d.type)) return toast('That is not a Billora backup file', true);
   const msg = S.bills.length
     ? `This will REPLACE all current data (${S.bills.length} bills) with the file's data (${(d.bills || []).length} bills, ${(d.services || []).length} services). Continue?`
-    : `Load ${(d.services || []).length} services and settings for <b>${esc(d.settings?.shopName || '')}</b>?`;
+    : `Load ${(d.services || []).length} services${(d.products || []).length ? `, ${d.products.length} products` : ''} and settings for <b>${esc(d.settings?.shopName || '')}</b>?`;
   if (!(await confirmBox(msg, 'Load'))) return false;
   S.settings = {...DEFAULT_SETTINGS, ...(d.settings || {}), setupDone: true};
-  S.services = d.services || []; S.staff = d.staff || []; S.bills = d.bills || [];
-  for (const k of ['settings', 'services', 'staff', 'bills']) await save(k);
+  S.services = d.services || []; S.staff = d.staff || []; S.bills = d.bills || []; S.products = d.products || [];
+  for (const k of COLLECTIONS) await save(k);
   refreshAll(); toast('Data loaded'); return true;
 }
 $('#bkImport').onclick = () => $('#bkFile').click();
@@ -872,7 +1142,7 @@ $('#suGo').onclick = async () => {
 function switchTab(t) {
   $$('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
   $$('.tab').forEach(s => s.classList.toggle('on', s.id === 'tab-' + t));
-  ({bills: renderBills, customers: renderCustomers, reports: renderReports, services: renderSvcAdmin, staff: renderStaff, settings: fillSettings}[t] || (() => $('#svcSearch').focus()))();
+  ({bills: renderBills, customers: renderCustomers, reports: renderReports, services: renderSvcAdmin, products: renderProducts, staff: renderStaff, settings: fillSettings}[t] || (() => $('#svcSearch').focus()))();
 }
 $('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); b && switchTab(b.dataset.tab); });
 document.addEventListener('keydown', e => {
@@ -886,7 +1156,8 @@ function refreshAll() {
   $('#brandName').textContent = st.shopName || 'Billora';
   document.title = (st.shopName ? st.shopName + ' — ' : '') + 'Billora';
   if (st.logo) $('#brandLogo').src = st.logo; else $('#brandLogo').removeAttribute('src');
-  renderGroupBtns(); renderCats(); renderGrid(); renderCart();
+  if (!activeProds().length) pick = 'svc';
+  renderPick(); renderGroupBtns(); renderCats(); renderGrid(); renderCart();
   const on = $('.tab.on')?.id?.slice(4); if (on && on !== 'bill') switchTab(on);
   const names = [...new Set(customers().map(c => c.name).filter(Boolean))].slice(0, 500);
   $('#custNames').innerHTML = names.map(n => `<option value="${esc(n)}">`).join('');

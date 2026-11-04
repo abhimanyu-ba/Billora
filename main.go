@@ -27,13 +27,24 @@ import (
 //go:embed web
 var webFS embed.FS
 
-const port = "47321"
+// port can be overridden with BILLORA_PORT (digits only) to run a test copy next to the real app.
+var port = envDigits("BILLORA_PORT", "47321")
+
+// envDigits returns the environment variable if it is all digits, else def.
+func envDigits(name, def string) string {
+	v := os.Getenv(name)
+	if v == "" || strings.Trim(v, "0123456789") != "" {
+		return def
+	}
+	return v
+}
 
 var (
-	dataDir  string
-	mu       sync.Mutex
-	lastPing atomic.Int64
-	validKey = regexp.MustCompile(`^(settings|services|staff|bills)$`)
+	dataDir     string
+	mu          sync.Mutex
+	lastPing    atomic.Int64
+	validKey    = regexp.MustCompile(`^(settings|services|staff|bills|products)$`)
+	collections = []string{"settings", "services", "staff", "bills", "products"}
 )
 
 func main() {
@@ -122,7 +133,7 @@ func handleLoad(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 	out := map[string]json.RawMessage{}
-	for _, k := range []string{"settings", "services", "staff", "bills"} {
+	for _, k := range collections {
 		b, err := os.ReadFile(filepath.Join(dataDir, k+".json"))
 		if err == nil && json.Valid(b) {
 			out[k] = b
@@ -177,7 +188,7 @@ func dailyBackup() {
 		return
 	}
 	any := false
-	for _, k := range []string{"settings", "services", "staff", "bills"} {
+	for _, k := range collections {
 		b, err := os.ReadFile(filepath.Join(dataDir, k+".json"))
 		if err != nil {
 			continue

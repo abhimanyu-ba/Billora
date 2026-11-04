@@ -18,6 +18,7 @@
     <button data-tab="customers">Customers</button>
     <button data-tab="reports">Reports</button>
     <button data-tab="services">Services</button>
+    <button data-tab="products">Products</button>
     <button data-tab="staff">Staff</button>
     <button data-tab="settings">Settings</button>
   </nav>
@@ -29,6 +30,7 @@
 <section id="tab-bill" class="tab on">
   <div class="bill-left">
     <div class="row gap">
+      <div id="pickMode" class="seg hidden"><button data-v="svc" class="on">Services</button><button data-v="prod">Products</button></div>
       <div id="groupBtns" class="seg"></div>
       <input id="svcSearch" class="grow" placeholder="Search service…  (F2)  — press Enter to add the first match" autocomplete="off">
     </div>
@@ -46,10 +48,10 @@
     </div>
     <div class="card cart-card">
       <table class="cart">
-        <thead><tr><th>Service</th><th class="w-staff">Staff</th><th class="w-qty">Qty</th><th class="w-price">Price ₹</th><th class="w-amt">Amount</th><th></th></tr></thead>
+        <thead><tr><th>Item</th><th class="w-staff">Staff</th><th class="w-qty">Qty</th><th class="w-price">Price ₹</th><th class="w-amt">Amount</th><th></th></tr></thead>
         <tbody id="cartBody"></tbody>
       </table>
-      <div id="cartEmpty" class="empty">Tap a service on the left to add it to the bill</div>
+      <div id="cartEmpty" class="empty">Tap a service or product on the left to add it to the bill</div>
       <button id="addCustom" class="link">+ Add a custom item</button>
     </div>
     <div class="card totals">
@@ -125,6 +127,7 @@
     <span class="grow"></span>
     <button id="rPrint" class="sec">Print report</button>
     <button id="rExport" class="sec">GST export (CSV)</button>
+    <button id="rHsn" class="sec">HSN summary (CSV)</button>
   </div>
   <div id="repBody"></div>
 </section>
@@ -141,6 +144,19 @@
   </div>
   <p class="muted small">Tip: for a price range (e.g. ₹6000–10000) enter both prices. The lower price is used on the bill and you can change it while billing.</p>
   <div class="tablewrap"><table class="list" id="svcTable"></table></div>
+</section>
+
+<!-- ================= PRODUCTS ================= -->
+<section id="tab-products" class="tab">
+  <div class="toolbar">
+    <h2>Products &amp; Stock</h2>
+    <input id="prodSearch" placeholder="Search name, brand, barcode, HSN" class="grow">
+    <button id="prodExport" class="sec">Export CSV</button>
+    <button id="prodAdd" class="pri">+ Add product</button>
+  </div>
+  <div id="prodSummary" class="summary"></div>
+  <p class="muted small">Products appear on the New Bill screen under <b>Products</b>. Stock goes down when you bill and comes back if a bill is cancelled. With a barcode scanner, scan into the search box to add the product.</p>
+  <div class="tablewrap"><table class="list" id="prodTable"></table></div>
 </section>
 
 <!-- ================= STAFF ================= -->
@@ -193,7 +209,7 @@
         <label class="f">State code<input data-s="stateCode" maxlength="2"></label>
         <label class="f">SAC code<input data-s="sac"></label>
       </div>
-      <p class="muted small">Salon and beauty services are usually 18% GST (CGST 9% + SGST 9%). Please confirm with your accountant.</p>
+      <p class="muted small">This rate is used for services, and for products set to “same as services”. Since 22 Sep 2025, salon and beauty services are 5% GST (CGST 2.5% + SGST 2.5%) without input tax credit. Each product can have its own rate in the Products tab. Please confirm the rates with your accountant.</p>
     </div>
 
     <div class="card">

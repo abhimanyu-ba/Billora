@@ -19,11 +19,12 @@ Windows may show "Windows protected your PC" the first time, because the exe isn
 - GST: prices include GST / GST added on top / no GST, with CGST + SGST split, SAC code, and invoice numbers that restart every financial year (`PREFIX/26-27/0001`)
 - Price ranges (e.g. ₹6000–10000), editable price per bill, custom items, ₹ or % discount
 - Cash / UPI / Card / Split payment, cash change calculator
-- Staff per service, with staff performance report for commission
+- Products (shampoo, hair serum…): barcode, HSN, own GST rate, stock that goes down on sale and back on cancel, low-stock alerts; bill services and products together
+- Staff per service, with staff performance report for commission (add staff right from the bill)
 - Customer lookup by mobile (visit count, total spent, last services)
 - Bill sizes: 80 mm and 58 mm thermal, A5, A4. Works with any printer through the Windows print dialog
 - Send bill on WhatsApp, reprint, cancel (cancelled bills are kept and marked, not deleted)
-- Reports: sales, GST summary, payment modes, staff, top services, categories, day by day; print or CSV export for the accountant
+- Reports: sales, services vs products, product sales, stock alerts, rate-wise GST summary, HSN/SAC summary (GSTR-1), payment modes, staff, top services, categories, day by day; print or CSV export for the accountant
 - Services import/export as CSV (edit your menu in Excel)
 - Full backup export/restore
 
